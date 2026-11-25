@@ -1,0 +1,204 @@
+PERAN
+Kamu adalah senior front-end engineer. Tugasmu: membuat ulang aplikasi web/PWA "BRANKAS DADAKAN" (brankas foto & video pribadi, bahasa antarmuka Indonesia, tema gelap hijau-tua + aksen emas/kuningan, mobile-first) sebagai SATU file `index.html` (HTML + CSS + JavaScript murni, tanpa framework, tanpa build step, tanpa SDK Supabase — pakai fetch langsung).
+
+======================================================================
+BAGIAN 1 — ATURAN MUTLAK: DATA LAMA TIDAK BOLEH HILANG
+======================================================================
+Sudah ada akun, foto, dan video nyata yang tersimpan. Aplikasi baru HARUS memakai backend yang SAMA PERSIS. Jangan mengubah, mengganti, atau "memperbaiki" hal-hal di bawah ini:
+
+1. Supabase project yang sama (tempat akun/username berada):
+   SUPABASE_URL      = "https://eqkkasecyikfgypxausk.supabase.co"
+   SUPABASE_ANON_KEY = "sb_publishable_fq8Yrry4a1A8xzZtCHbd-g_BXYxksYA"
+   Jangan membuat project Supabase baru. Jangan memakai Firebase / backend lain.
+2. Username → email palsu: `username.trim().toLowerCase() + "@gamevault.local"` (FAKE_EMAIL_DOMAIN = "gamevault.local"). Tampilan "Masuk sebagai <b>username</b>" = bagian email sebelum "@". Rumus ini TIDAK BOLEH berubah, kalau berubah semua akun lama tidak bisa login.
+3. Cloudflare Worker + R2 yang sama (penyimpanan foto/video):
+   WORKER_DIRECT = "https://cold-bread-3f74.akbargaming349.workers.dev"
+   Seluruh foto/video tetap di bucket R2 lewat Worker ini. Jangan memanggil R2/S3 langsung, jangan menaruh access key R2 di browser, jangan mengubah struktur key. Worker TIDAK diubah.
+4. Struktur key R2 (jangan diubah):
+   - File: `<userId>/<path relatif>`; userId = UUID user Supabase (`user.id`). Folder bersarang memakai "/", mis. `<userId>/Liburan/Bali/foto.jpg`.
+   - Folder kosong = file penanda `<userId>/<folder>/.keep`.
+   - Sampul/thumbnail: `__thumbs/<userId>/<path>.jpg` (diurus Worker).
+   - Sidik jari file dobel tersimpan di customMetadata `fp`.
+5. Hash kata sandi lihat galeri: SHA-256 hex dari string `"game-vault::" + teks` (lihat fungsi hashText di bawah). Rumus & prefix "game-vault::" TIDAK BOLEH berubah, kalau berubah semua kata sandi lihat lama tidak cocok.
+   async function hashText(text){
+     const enc = new TextEncoder().encode('game-vault::' + text);
+     const buf = await crypto.subtle.digest('SHA-256', enc);
+     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+   }
+6. Nama tabel & kolom Supabase (jangan diganti): `view_passwords(user_id, view_hash)`, `offline_marks(user_id, path, name, created_at)`, `favorite_marks(user_id, path, name, created_at)`. Tabel `shares` hanya diakses Worker, TIDAK PERNAH dari browser.
+7. Jangan menghapus, memindahkan, atau menulis ulang data apa pun saat aplikasi dimuat/login (tidak ada "migrasi otomatis", tidak ada "reset", tidak ada pembersihan massal). Satu-satunya penghapusan yang boleh: yang diminta pengguna lewat tombol + konfirmasi, atau pembersihan tanda "hantu" (lihat Bagian 5, butir Offline/Favorit).
+8. Jangan menaruh `SUPABASE_SERVICE_ROLE_KEY` atau secret apa pun di index.html.
+9. File statis pendamping tetap dipakai dengan path relatif: `manifest.json`, `icon.svg`, `favicon.ico`, `icon-180.png`, `icon-192.png`, `icon-512.png`, `icon-512-maskable.png`. Sertakan `<link rel="manifest">`, meta `apple-mobile-web-app-capable=yes`, `apple-mobile-web-app-title=Brankas`, `apple-mobile-web-app-status-bar-style=black-translucent`, theme-color #14201d.
+10. Penting soal istilah: "database" di aplikasi ini ada dua. Akun/username, kata sandi lihat, tanda Offline, tanda Favorit = Supabase. Isi foto/video = Cloudflare R2 (lewat Worker). R2 hanya penyimpanan file, bukan database akun, jadi Supabase WAJIB tetap dipakai.
+
+======================================================================
+BAGIAN 1B — PERLINDUNGAN FOTO/VIDEO (DI DALAM FOLDER MAUPUN DI LUAR FOLDER)
+======================================================================
+Prioritas nomor 1 seluruh proyek: SEMUA foto dan video yang sudah ada harus tetap tampil dan utuh, baik yang di luar folder (Koleksimu, key `<userId>/nama.jpg`) maupun di dalam folder/sub-folder (key `<userId>/Folder/Sub/nama.jpg`).
+1. Daftar galeri = hasil `GET /list/:userId` apa adanya. Item dengan folder=null → Koleksimu; item dengan path ber-"/" → folder dari bagian path sebelum nama file (nested sampai 6 tingkat). Jangan menyaring, menyembunyikan, mengganti nama, atau mengelompokkan ulang dengan cara yang membuat item lama tidak tampil. Folder kosong dikenali dari `.keep`, dan `.keep` tidak tampil sebagai file.
+2. Tipe item ditentukan dari ekstensi nama file: video = mp4, mov, webm, m4v, avi (tidak peka huruf besar/kecil); selain itu foto. File `.live.mov` lama tampil sebagai video biasa.
+3. Aplikasi TIDAK BOLEH memanggil DELETE /file, DELETE /folder, POST /move, atau PUT/POST yang menimpa file lama, kecuali sebagai akibat langsung dari tombol yang ditekan pengguna DAN sudah lewat dialog konfirmasi (hapus) atau pilihan folder tujuan yang dipilih pengguna (pindah). Tidak ada penghapusan/pemindahan otomatis saat startup, login, refresh, sinkron offline, atau pemulihan error.
+4. Nama file saat unggah tidak boleh menimpa file lama: kalau nama sudah dipakai di folder tujuan, buat nama unik (mis. tambah " (2)") atau tanya pengguna. Jangan pernah `upload/init` ke key yang sudah berisi file lain tanpa konfirmasi.
+5. Pindah file: kirim `moves` hanya untuk item yang dipilih. Setelah `/move` sukses, JANGAN menghapus sumber sendiri dari browser; Worker yang mengurus (salin lalu hapus). Jika respons gagal, item tetap tampil di lokasi lamanya.
+6. Hapus folder = menghapus SEMUA isi folder itu. Dialog konfirmasi wajib menyebut nama folder dan jumlah item di dalamnya, dan tombolnya harus beda dari tombol hapus biasa.
+7. Jika memuat daftar gagal (jaringan/401/5xx), tampilkan pesan gagal + "Coba lagi". Jangan menampilkan galeri kosong, dan jangan menjalankan pembersihan tanda hantu Offline/Favorit pada saat itu.
+8. Pembersihan "hantu" hanya menghapus BARIS TANDA di Supabase/blob lokal (bukan file di R2), dan hanya setelah daftar galeri berhasil dimuat penuh.
+9. Pengujian wajib (tulis hasilnya di checklist akhir): hitung jumlah foto dan video di Koleksimu dan di tiap folder sebelum dan sesudah pakai versi baru; angkanya harus sama.
+
+======================================================================
+BAGIAN 2 — ARSITEKTUR
+======================================================================
+- `index.html` (UI + logika) → memanggil Supabase (auth + REST `/rest/v1/...`) dan Worker (media).
+- Worker memverifikasi token Supabase di setiap request, lalu membaca/menulis R2.
+- Opsional `_worker.js` (Cloudflare Pages advanced mode) meneruskan `/api/*` ke Worker (karena sebagian operator seluler memblokir *.workers.dev). Di index.html: tes `GET <WORKER_DIRECT>/ping` (timeout 6 dtk, balasan `{ok:true}`); kalau gagal pakai `location.origin + "/api"` sebagai base. Uji ulang saat jaringan berganti. Semua panggilan menunggu pemilihan jalur ini.
+- Token: access_token + refresh_token disimpan di memori (state). Panggilan media memakai header `Authorization: Bearer <token>` atau `?token=<token>` (untuk <img>/<video> src dan GET yang ingin menghindari preflight CORS).
+
+======================================================================
+BAGIAN 3 — KONTRAK API WORKER (jangan diubah, hanya dipanggil)
+======================================================================
+Semua path memakai `encodeURIComponent` per segmen. `:userId` = user.id Supabase.
+- GET  /ping → {ok:true}
+- GET  /list/:userId (Bearer atau ?token=) → daftar file: nama relatif (termasuk folder), size, uploaded, fp. Folder diturunkan dari path; ".keep" bukan file.
+- GET  /file/:userId/:path?token= → byte file, mendukung header Range (streaming video, balas 206/416). Dipakai langsung sebagai src.
+- DELETE /file/:userId/:path (Bearer) → hapus + Worker memastikan objek benar-benar hilang (head) + sampul ikut terhapus; balas {ok:true}.
+- POST /folder/:userId/:folderName (Bearer) → buat folder kosong (.keep). Nama: maks 6 tingkat, tiap segmen maks 60 karakter, tanpa "..", bukan ".keep".
+- DELETE /folder/:userId/:folderName (Bearer) → hapus folder + seluruh isinya (Worker juga membersihkan tanda offline/favorit/share terkait).
+- POST /move/:userId (Bearer, body {moves:[{from,to}]}) → pindah/rename file (sidik jari ikut terbawa).
+- GET  /thumb/:userId/:path?token= → sampul JPEG kecil (404 jika belum ada). PUT /thumb/:userId/:path (Bearer, body JPEG ≤400KB, ±480px) → simpan sampul yang dibuat browser.
+- Unggah multipart:
+  POST /upload/init/:userId/:fileName → {uploadId}
+  POST /upload/part/:userId/:fileName?uploadId=&partNumber= (body = potongan) → {etag}
+  POST /upload/complete/:userId/:fileName?uploadId= (body {parts:[{partNumber,etag}], contentType}) → {ok:true}
+  POST /upload/abort/:userId/:fileName?uploadId=
+  Header opsional: `X-Fingerprint` (sidik jari file), `X-Check-Dup`. Server membalas 409 jika isi file sudah ada (dobel).
+- POST /fingerprint/:userId (Bearer, body {names:[...maks 6]}) → {fps:{nama: fp}} — sidik jari file lama yang dibaca langsung dari R2.
+- Link berbagi: 
+  POST /share/:userId (Bearer, body {type:'file'|'folder', path, viewOnly?:true}) → {id}
+  GET /share/list/:userId (Bearer) ; DELETE /share/:userId/:shareId (Bearer)
+  Publik tanpa login: GET /share/:shareId[?path=Sub/Folder] (metadata + sub-folder + file), GET /share/:shareId/raw (file tunggal), GET /share/:shareId/item/:relPath, GET /share/:shareId/thumb/:relPath
+  URL link berbagi untuk pengguna: `<origin halaman>/?share=<shareId>`.
+  
+Skema tabel Supabase yang sudah ada (jangan dibuat ulang jika sudah ada; berikan SQL ini hanya sebagai dokumentasi, semuanya `if not exists`):
+- offline_marks & favorite_marks: id bigint identity PK, user_id uuid → auth.users on delete cascade, path text, name text, created_at timestamptz default now(), UNIQUE(user_id, path); RLS aktif, policy select/insert/update/delete hanya jika auth.uid() = user_id. Upsert memakai `?on_conflict=user_id,path` dengan header `Prefer: resolution=merge-duplicates`.
+- shares: id uuid PK, user_id, type ('file'|'folder'), path, created_at, view_only boolean default false; RLS aktif TANPA policy sama sekali (hanya Worker/service role).
+- view_passwords: user_id (uuid), view_hash (text). RLS: pemilik hanya boleh insert & select barisnya sendiri. (Skema persis tabel ini tidak ada di dokumentasi lama; JANGAN dibuat ulang/diubah — pakai apa adanya lewat REST: POST `/rest/v1/view_passwords` body {user_id, view_hash}, GET `/rest/v1/view_passwords?user_id=eq.<id>&select=view_hash`.)
+
+======================================================================
+BAGIAN 4 — LAYAR & ALUR UTAMA
+======================================================================
+A. Login — kolom Username + Kata sandi login (ikon mata tampil/sembunyi). POST `/auth/v1/token?grant_type=password` dengan email palsu. Header `apikey: ANON_KEY`. Pesan error jelas. Link "Belum punya akun? Daftar dulu".
+B. Daftar — Username, kata sandi login (+ulang), kata sandi lihat galeri (+ulang). Kata sandi lihat HARUS berbeda dari kata sandi login. Alur: POST `/auth/v1/signup` → login → simpan hash kata sandi lihat ke `view_passwords`. Kalau simpan gagal: "Akun dibuat tapi gagal menyimpan kata sandi lihat…".
+C. Beranda — "Masuk sebagai <username>", tombol Keluar, dua kartu: "Unggah foto / video" dan "Lihat galeri" (wajib kata sandi kedua).
+D. Kunci galeri — input kata sandi lihat; bandingkan hash dengan `view_passwords`. Cek ini pakai timeout + 3x coba ulang otomatis (jeda makin lama); kegagalan JARINGAN ≠ "data tidak ditemukan" (pesan terpisah: "Gagal terhubung ke server…"). Jika 401 → perbarui token lalu ulangi. Setelah lolos, daftar file dimuat; jika gagal memuat, tetap di layar kunci dengan pesan jelas (jangan masuk ke galeri kosong).
+E. Unggah — lihat Bagian 5.1.
+F. Galeri 3 tab — Koleksi, Offline, Favorit (dengan angka (N) di tab) — lihat Bagian 5.2–5.6.
+G. Halaman publik link berbagi (`?share=<id>`) tanpa login — lihat Bagian 5.7.
+H. Label versi kecil di pojok kanan bawah: "v39".
+
+======================================================================
+BAGIAN 5 — DAFTAR SEMUA FITUR (semua wajib ada)
+======================================================================
+
+5.1 UNGGAH
+- Pilih banyak foto/video sekaligus; file baru DITAMBAHKAN ke antrean (tidak menimpa yang lama). Pemilih tambahan "Pilih lewat Berkas (cara lain)" untuk file besar/gagal baca.
+- Pilihan "Simpan ke:" → "Koleksimu (tanpa folder)" atau folder mana pun (nested). Dari galeri/folder, tombol ⬆ membuka layar ini dengan tujuan otomatis folder yang sedang dibuka; "Kembali" kembali ke galeri yang sama dan memuatnya ulang.
+- Pratinjau tiap file; centang opsional "Simpan offline sekalian" dan "Tandai favorit sekalian".
+- Multipart: potongan 8MB, 3 potongan paralel; percobaan ulang otomatis (potongan: sampai 4x; seluruh file: 2x; file gagal DILEWATI lalu antrean lanjut, ringkasan di akhir menyebut file yang gagal). Deteksi macet 45 dtk → batalkan & ulangi potongan. init/complete punya timeout (30/60 dtk) + retry. Jangan pernah "complete" jika ada potongan bolong.
+- Progres per byte (XHR): "37% · 1,2 MB/dtk · sisa ±3 mnt (bagian 5/18)".
+- Tombol Jeda / Lanjutkan / Batal unggah. Saat dijeda tombol tambah file boleh ditekan. Batal membersihkan cadangan sisa agar tidak "hidup lagi" sebagai unggahan tertunda.
+- Unggahan LANJUT dari potongan terakhir bila putus (catatan resume per file di localStorage); memilih file yang sama lagi melanjutkan, bukan mulai dari 0. Jika tujuan folder diganti → mulai baru.
+- Salinan sementara anti NotReadableError (Android): segera setelah file dipilih, salin per 4MB ke OPFS (`navigator.storage.getDirectory()`), progres "Menyalin ke penyimpanan sementara HP… X%", unggah dari salinan itu; dibersihkan setelah sukses/dibuang/saat app dibuka ulang. Jika OPFS tidak ada/penuh → kembali ke file asli. Cek keterbacaan awal & akhir file; "sentuh" file antrean tiap 15 dtk; tombol "Pilih ulang (Galeri)" / "Pilih ulang (Berkas)" pada kegagalan baca; tanda ⚠ merah pada file tak terbaca.
+- Unggahan tertunda otomatis dilanjutkan saat galeri dibuka ("Melanjutkan unggahan tertunda…", file tetap masuk folder tujuan semula, tidak mengunggah ganda file yang sedang diunggah).
+- Token Supabase diperbarui otomatis (cek tiap menit, saat tab terlihat lagi, dan sebelum unggah jika sisa <3 menit; 401 → paksa refresh lalu ulangi).
+- Deteksi DOBEL: sidik jari = ukuran + SHA-256 dari 12 potongan merata. Cek terhadap isi brankas (SEMUA folder; daftar dimuat dulu bila belum ada), file lama diverifikasi lewat `/fingerprint`, dan terhadap antrean sendiri. Pop-up daftar dobel dengan lokasinya ("sudah ada di folder “Gym”", "sudah ada di luar folder (Koleksimu)", "sama dengan file lain di antrean"), label ⚠ DOBEL per file, tombol "Hapus yang dobel dari antrean", "Tetap unggah" per file. Saat Simpan dengan dobel persis: konfirmasi (OK = lewati dobel & unggah sisanya; Batal = kembali & tombol Simpan aktif lagi). Server menolak 409 sebagai jaring terakhir.
+- Setelah unggah selesai: muat ulang daftar galeri/folder dari server SEBELUM menjalankan penyimpanan offline/favorit (supaya file baru tidak dianggap "hantu").
+- Jika "simpan offline" gagal, pesan error harus akurat (pisahkan gagal simpan lokal vs gagal menandai di akun).
+- Diagnosa error unggah: bedakan "server tidak terjangkau" vs "server terjangkau tapi potongan besar terputus" (cek /ping).
+
+5.2 KOLEKSI (tab 1)
+- Judul "Koleksimu"; grid foto & video; header dengan DUA tombol toggle "Foto (n)" / "Video (n)" (ketuk Video → daftar video, ketuk Foto → foto; bukan ditumpuk; bila foto kosong dan hanya ada video, tampil Video dulu). Berlaku juga di dalam folder dan tab Favorit.
+- Tombol bar: refresh (muat ulang daftar + segarkan tanda offline/favorit + lanjutkan unggahan tertunda, spinner + toast "Koleksi diperbarui."), kelola/ganti folder, unggah ⬆, dan (di dalam folder) buat sub-folder ➕.
+- Folder BERSARANG sampai 6 tingkat; kartu sub-folder; breadcrumb "Koleksimu / Induk / Anak" yang tiap segmennya bisa diketuk; tombol kembali.
+- Buat folder (nama sah: maks 60 karakter/segmen, tanpa ".."/".keep"); hapus folder + isinya (dengan konfirmasi).
+- Mode "Pilih" (multi-select) + "Pilih semua" (mengikuti bagian Foto/Video yang tampil; ganti bagian membatalkan mode pilih). Aksi massal: Hapus (konfirmasi), Pindahkan ke folder, Bagikan, Favorit, Offline.
+- Sheet "Pindahkan N item ke…" dan "Kelola folder": muncul dari ATAS layar; tiap folder menampilkan jumlah item ("27 item") termasuk "Tanpa folder (Koleksimu)"; folder yang punya sub-folder TERTUTUP dulu, ikon ≡ untuk buka/tutup (posisi scroll tidak lompat); kolom "Cari folder…" bertema gelap menempel di atas (ketik sebagian nama → semua cocok tampil dengan path lengkap, mis. "Camping hils / Hils2"; kosong → tampilan buka/tutup; tidak ada hasil → "Folder tidak ditemukan."). Kolom cari dikosongkan tiap sheet dibuka. Buat folder baru dari sheet pindah.
+- Banner dobel: "⚠ Ada N foto/video DOBEL di sini", label DOBEL di kotak, tombol "Pilih yang dobel (simpan 1 yang paling lama)", hapus lewat tombol Hapus + konfirmasi.
+- Hapus satu item: tombol tempat sampah + konfirmasi "Hapus video/foto ini?" (Ya, hapus / Batal). Item baru hilang dari layar setelah server memastikan terhapus (token diperbarui, coba 3x); gagal → item tetap tampil + pesan error. Hapus juga membersihkan tanda favorit/offline.
+- Bar pekerjaan pindah (renderMoveJobsBanner) menampilkan status proses pindah.
+- Galeri kosong vs GAGAL memuat dibedakan: "Gagal memuat galeri (cek koneksi internet)" + tombol "Coba lagi"; jangan pernah menampilkan "Belum ada foto" saat sebenarnya gagal memuat.
+
+5.3 PEMUAT SAMPUL (grid)
+- Sampul foto/video dibuat di browser lalu diunggah balik lewat PUT /thumb; kunjungan berikutnya memakai GET /thumb (cepat, tidak unduh file asli).
+- Lazy loading dengan antrean prioritas: slot paling dekat layar dulu; unduhan yang slotnya keluar layar DIBATALKAN & slotnya dibebaskan; video lambat tidak menahan antrean >8 dtk; pramuat 1200px depan/belakang; 250 ms setelah scroll berhenti, slot di/dekat layar yang masih kosong dimuat ulang. Paralel normal: foto 10, video 6; di data seluler/Hemat Data/2G-3G: foto 4, video 3.
+- Saat modal dibuka, hentikan sampul video yang masih mengunduh (jangan berebut bandwidth); lanjutkan saat modal ditutup.
+
+5.4 MODAL PEMUTAR / PELIHAT
+- Overlay ditempel ke document.body (di luar #app) agar render() tidak membongkar video yang sedang diputar. Foto: <img>; video: `<video controls autoplay playsinline preload="auto">`.
+- Tombol unduh (dengan progres), tutup ✕, panah prev/next + penghitung "i / n", swipe kiri/kanan di area GELAP di luar video (sentuhan yang mulai di atas <video> diabaikan; gestur harus dominan horizontal >50px).
+- Mundurkan durasi video tidak boleh memicu pindah item.
+- Streaming lewat Range (Worker 1 operasi R2 per request).
+- Modal juga bisa membuka item dari tab Offline (blob lokal → URL.createObjectURL, dilepas saat ditutup).
+
+5.5 OFFLINE (tab 2)
+- Tandai foto/video "simpan offline": blob disimpan di Cache Storage HP (`caches.open(...)`), tanda disimpan di Supabase `offline_marks` (per AKUN, jadi HP lain tahu file mana yang harus diunduh). Lencana & tombol OFFLINE muncul untuk FOTO dan VIDEO.
+- Penyimpanan lokal dicoba sampai 3x (jeda 400ms lalu 900ms) karena Cache API Safari sering "Internal error".
+- Tab Offline: bagian "Tersimpan di HP ini" dan "Ditandai di akun, dari HP lain", masing-masing terbagi Foto dan Video. Tombol "Pilih" per kelompok (state terpisah dari Koleksi): lokal → "Hapus dari offline"; remote → "Unduh ke HP ini" (satu per satu), "Pilih semua", bar aksi bawah.
+- Sinkron otomatis saat galeri dibuka: unduh item yang ditandai tapi belum ada di HP; item gagal DILEWATI (tidak menghentikan antrean) lalu ringkasan "berhasil N, gagal M (nama…)".
+- Bar Jeda/Lanjutkan unduhan offline (tampil di tab Offline dan di semua tab selagi unduhan berjalan/dijeda). Jeda menghentikan sinkron + unduhan berjalan, tanda di akun TIDAK dihapus. Status jeda disimpan per akun di localStorage (kunci per userId), tidak terbawa ke akun lain saat logout. Tombol manual "Unduh ke HP ini" tetap bisa saat dijeda.
+- Rekonsiliasi blob lokal ke daftar galeri (`reconcileOfflineLocal`): cocok persis → tetap; tidak cocok tapi nama file polos cocok TEPAT satu item → pindahkan blob lokal & benahi tanda di akun; tidak cocok sama sekali → blob "hantu" dibersihkan (dengan masa tenggang 3 menit untuk blob yang baru disimpan). Antrean "tanda tertunda" (PENDING_MARKS_KEY di localStorage) mengulang penandaan akun yang gagal.
+- Hapus/pindah folder di satu HP membersihkan tanda & blob terkait di HP itu; `migrateMarksAfterMove()` memindahkan path tanda saat file dipindah.
+
+5.6 FAVORIT (tab 3)
+- Ikon hati per item (juga di modal), berlaku foto & video, per AKUN (tabel favorite_marks). Perubahan ikon INSTAN (optimistic UI, tidak render ulang seluruh grid), dikirim di latar; gagal → ikon dikembalikan + pesan galat; tekan cepat berkali-kali aman (hasil akhir yang dikirim).
+- Urutan tab: yang PALING BARU ditandai paling atas (pakai `created_at`; kalau kolom tak ada, jatuh ke urutan galeri).
+- Angka "Favorit (N)" dihitung dari item yang benar-benar cocok ke galeri (bukan baris mentah) dan berubah langsung saat hati ditekan.
+- `resolveFavoriteMarkedItem()`: path favorit yang tak cocok → coba cocokkan lewat nama file polos (tepat satu → migrasi tanda); tidak ketemu → hapus tanda hantu.
+- Jika memuat daftar favorit GAGAL, jangan kosongkan daftar di layar; perubahan hati yang baru ditekan jangan ditimpa penyegaran yang berjalan bersamaan.
+- Tab Favorit memakai pola Foto/Video toggle yang sama.
+
+5.7 BAGIKAN (LINK PUBLIK)
+- Ikon bagikan pada file maupun folder → sheet pilihan: "Bisa diunduh" atau "Hanya lihat". Lalu sheet berisi link (tombol Salin dengan status "Tersalin", tombol Cabut link).
+- Halaman publik `?share=<id>` tanpa login:
+  • File tunggal: tampilan file + tombol unduh (kecuali hanya-lihat).
+  • Folder: jelajah sub-folder (`?path=`) dengan breadcrumb publik, chooser Foto/Video, grid dengan sampul, modal pelihat dengan prev/next/swipe, mode "Pilih" + "Unduh terpilih" (kecuali hanya-lihat).
+  • Folder di dalam folder yang dibagikan ikut kebagian link yang sama.
+  • Mode "Hanya lihat": tanpa tombol Unduh/Pilih/Unduh terpilih, video tanpa tombol download & PiP (`controlsList="nodownload"`, `disablePictureInPicture`), klik-kanan/tekan-lama/seret pada media dimatikan (contextmenu, dragstart, user-select none). Worker hanya melayani byte link hanya-lihat untuk <img>/<video> (403 selain itu) — ini pengaman ringan, bukan anti tangkap-layar; tulis jujur di UI/dokumentasi.
+  • Halaman publik menunggu pemilihan jalur (/api atau langsung) dan mencoba ulang; tampilkan hanya header merek (renderShareBrandOnly).
+  • Link lama tetap "bisa diunduh". Jika kolom shares.view_only belum ada, memilih "Hanya lihat" menampilkan pesan agar menjalankan SQL `alter table shares add column if not exists view_only boolean not null default false;`.
+
+5.8 UNDUH
+- Tombol unduh satu file dengan progres di modal; unduh banyak (publik: "Unduh terpilih") satu per satu. Satu tombol = satu file asli (tidak ada lagi "Foto Live").
+
+5.9 KETAHANAN JARINGAN (khusus data seluler)
+- Pembantu `fetchT(url, opts, timeoutMs)` dan `netGet(makeReq, {timeout, tries:3})`: timeout per percobaan makin panjang (+10 dtk per ulang), retry untuk error jaringan/timeout/5xx/429, jeda antar percobaan.
+- Daftar file: percobaan ke-2 dst. pakai `?token=` (tanpa preflight CORS). 401 → perbarui token & ulangi.
+- Pesan gagal jelas: "Gagal terhubung ke server…", tidak pernah salah menuduh "data hilang".
+- `storageList()` melempar error yang jelas saat gagal (jangan pernah mengembalikan daftar kosong diam-diam).
+
+5.10 LAIN-LAIN
+- Nama aplikasi tampil apa adanya "BRANKAS DADAKAN" dengan subjudul "FOTO & VIDEO PRIBADI" (tanpa kamuflase "Game") di `<title>`, header login/galeri, dan header halaman share. Ikon gembok di logo.
+- PWA: bisa di-install (manifest standalone portrait, background/theme #14201d).
+- Tombol "Keluar" membersihkan state sesi (overlay yatim dibuang, status jeda tidak terbawa).
+- Toast/pesan sukses & galat berbahasa Indonesia; semua teks pengguna di-escape (escapeHtml).
+- Fitur "Foto Live" SUDAH DIHAPUS — jangan dibuat lagi. File `....live.mov` lama di R2 tampil sebagai video biasa; jangan dihapus otomatis.
+
+======================================================================
+BAGIAN 6 — HAL TEKNIS PENTING YANG SERING JADI BUG (patuhi)
+======================================================================
+1. Satu `render()` yang membongkar #app tidak boleh membongkar modal/video yang sedang diputar; progres unggah hanya mengganti teks (`setLiveText`), bukan render penuh.
+2. Pencocokan "hantu" (Offline/Favorit) harus memakai daftar galeri TERBARU, dan tidak boleh menghapus tanda bila daftar galeri gagal dimuat/kosong karena error.
+3. Jangan menimpa `pendingFiles` saat memilih file baru (selalu concat).
+4. Kegagalan hapus tidak boleh diabaikan diam-diam.
+5. Cache Storage Safari bisa melempar "Internal error" acak — selalu ada retry.
+6. Cadangan unggahan tertunda: file >50MB TIDAK dicadangkan ke Cache Storage (memori); entri yatim dibersihkan; blob dibaca satu per satu saat gilirannya.
+7. Batas jujur video lambat: video dengan atom `moov` di akhir file perlu `ffmpeg -movflags +faststart` — sampaikan di dokumentasi, bukan bug aplikasi.
+
+======================================================================
+BAGIAN 7 — FORMAT KELUARAN YANG KAMU BERIKAN
+======================================================================
+1. Satu file `index.html` lengkap, siap pakai, tanpa placeholder/"TODO"/"…dst". Kalau terlalu panjang, bagi dalam beberapa bagian berurutan TANPA mengurangi fitur, dan tandai jelas awal/akhir tiap bagian.
+2. Tidak mengubah Worker. Tidak membuat backend baru.
+3. Sebelum selesai, tampilkan checklist tertulis: tiap nomor di Bagian 5 → "ada/tidak" + nama fungsi utamanya, dan konfirmasi bahwa 10 aturan Bagian 1 tidak dilanggar.
+4. Dokumentasi singkat cara deploy: ganti `index.html` di Cloudflare Pages (`npx wrangler pages deploy . --project-name <nama>`), file ikon/manifest tetap di folder yang sama.
+
+CARA UJI SEBELUM DIPAKAI (jalankan manusia, bukan kamu): login dengan username lama; kata sandi lihat lama harus tetap bisa membuka galeri; semua folder/foto/video lama muncul; angka Offline & Favorit sama seperti sebelumnya. Jika salah satu gagal, rollback ke index.html lama.

@@ -1,0 +1,6 @@
+{
+  "name": "Brankas Dadakan",
+  "description": "Brankas foto & video pribadi bertema gelap hijau-tua dan emas",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
